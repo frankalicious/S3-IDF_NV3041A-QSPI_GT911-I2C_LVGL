@@ -50,35 +50,39 @@ esp_lcd_touch_handle_t tp = NULL;
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-#define EXAMPLE_LVGL_TASK_STACK_SIZE   (4 * 1024)
+#define EXAMPLE_LVGL_TASK_STACK_SIZE   (8 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
+
+static void example_lvgl_update_cb(lv_display_t *display);
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
-    lv_disp_drv_t *disp_driver = (lv_disp_drv_t *)user_ctx;
-    lv_disp_flush_ready(disp_driver);
+    lv_display_flush_ready((lv_display_t *)user_ctx);
     return false;
 }
 
-static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+static void example_lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *color_map)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
+    /* example_lvgl_update_cb(display); */
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) lv_display_get_user_data(display);
     const int offsetx1 = area->x1;
     const int offsetx2 = area->x2;
     const int offsety1 = area->y1;
     const int offsety2 = area->y2;
 
+    lv_draw_sw_rgb565_swap(
+	    color_map, (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1));
     // 将缓冲区的内容复制到显示的特定区域
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
 
 /* 在 LVGL 中旋转屏幕时，旋转显示和触摸。 更新驱动程序参数时调用 */
-static void example_lvgl_update_cb(lv_disp_drv_t *drv)
+static void example_lvgl_update_cb(lv_display_t *display)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) lv_display_get_user_data(display);
 
-    switch (drv->rotated) {
-    case LV_DISP_ROT_NONE:
+    switch (lv_display_get_rotation(display)) {
+    case LV_DISPLAY_ROTATION_0:
         // 旋转液晶显示屏
         esp_lcd_panel_swap_xy(panel_handle, false);
         esp_lcd_panel_mirror(panel_handle, true, false);
@@ -86,7 +90,7 @@ static void example_lvgl_update_cb(lv_disp_drv_t *drv)
         esp_lcd_touch_set_mirror_y(tp, false);
         esp_lcd_touch_set_mirror_x(tp, false);
         break;
-    case LV_DISP_ROT_90:
+    case LV_DISPLAY_ROTATION_90:
         // 旋转液晶显示屏
         esp_lcd_panel_swap_xy(panel_handle, true);
         esp_lcd_panel_mirror(panel_handle, true, true);
@@ -94,7 +98,7 @@ static void example_lvgl_update_cb(lv_disp_drv_t *drv)
         esp_lcd_touch_set_mirror_y(tp, false);
         esp_lcd_touch_set_mirror_x(tp, false);
         break;
-    case LV_DISP_ROT_180:
+    case LV_DISPLAY_ROTATION_180:
         // 旋转液晶显示屏
         esp_lcd_panel_swap_xy(panel_handle, false);
         esp_lcd_panel_mirror(panel_handle, false, true);
@@ -102,7 +106,7 @@ static void example_lvgl_update_cb(lv_disp_drv_t *drv)
         esp_lcd_touch_set_mirror_y(tp, false);
         esp_lcd_touch_set_mirror_x(tp, false);
         break;
-    case LV_DISP_ROT_270:
+    case LV_DISPLAY_ROTATION_270:
         // 旋转液晶显示屏
         esp_lcd_panel_swap_xy(panel_handle, true);
         esp_lcd_panel_mirror(panel_handle, false, false);
@@ -115,9 +119,9 @@ static void example_lvgl_update_cb(lv_disp_drv_t *drv)
 
 static SemaphoreHandle_t touch_mux = NULL;
 
-static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+static void example_lvgl_touch_cb(lv_indev_t *indev_drv, lv_indev_data_t *data)
 {
-    esp_lcd_touch_handle_t tp = (esp_lcd_touch_handle_t)drv->user_data;
+    esp_lcd_touch_handle_t tp = (esp_lcd_touch_handle_t)lv_indev_get_user_data(indev_drv);
     assert(tp);
 
     uint16_t tp_x;
@@ -193,8 +197,9 @@ static void example_lvgl_port_task(void *arg)
 
 void app_main(void)
 {
-    static lv_disp_draw_buf_t disp_buf; // 包含称为绘制缓冲区的内部图形缓冲区
-    static lv_disp_drv_t disp_drv;      //包含回调函数
+    ESP_LOGI(TAG, "Initialize LVGL library");
+    lv_init();
+    lv_display_t* display = lv_display_create(EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
 
     ESP_LOGI(TAG, "Turn off LCD backlight");
     gpio_config_t bk_gpio_config = {
@@ -215,7 +220,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Install panel IO");
     esp_lcd_panel_io_handle_t io_handle = NULL;
-    const esp_lcd_panel_io_spi_config_t io_config = NV3041A_PANEL_IO_QSPI_CONFIG(EXAMPLE_PIN_NUM_LCD_CS, example_notify_lvgl_flush_ready, &disp_drv);
+    const esp_lcd_panel_io_spi_config_t io_config = NV3041A_PANEL_IO_QSPI_CONFIG(EXAMPLE_PIN_NUM_LCD_CS, example_notify_lvgl_flush_ready, display);
 
     nv3041a_vendor_config_t vendor_config = {
         .flags = {
@@ -229,7 +234,7 @@ void app_main(void)
     esp_lcd_panel_handle_t panel_handle = NULL;
     const esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = EXAMPLE_PIN_NUM_LCD_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
         .bits_per_pixel = LCD_BIT_PER_PIXEL,
         .vendor_config = &vendor_config,
     };
@@ -286,26 +291,19 @@ void app_main(void)
     ESP_LOGI(TAG, "Turn on LCD backlight");
     gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, EXAMPLE_LCD_BK_LIGHT_ON_LEVEL);
 
-    ESP_LOGI(TAG, "Initialize LVGL library");
-    lv_init();
     // 分配 LVGL 使用的绘制缓冲区
     // 建议选择绘制缓冲区的大小至少为屏幕大小的 1/10
-    lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 30 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    size_t buffer_size = EXAMPLE_LCD_H_RES * 30 * sizeof(lv_color_t);
+    lv_color_t* buf1 = heap_caps_malloc(buffer_size, MALLOC_CAP_DMA);
     assert(buf1);
-    lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 30 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_color_t* buf2 = heap_caps_malloc(buffer_size, MALLOC_CAP_DMA);
     assert(buf2);
     // 初始化 LVGL 绘制缓冲区
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * 30);
+    lv_display_set_buffers(display, buf1, buf2, buffer_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
-    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
-    disp_drv.flush_cb = example_lvgl_flush_cb;
-    disp_drv.drv_update_cb = example_lvgl_update_cb;
-    disp_drv.draw_buf = &disp_buf;
-    disp_drv.user_data = panel_handle;
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    lv_display_set_user_data(display, panel_handle);
+    lv_display_set_flush_cb(display, example_lvgl_flush_cb);
 
     ESP_LOGI(TAG, "Install LVGL tick timer");
     // LVGL 的 Tick 接口（使用 esp_timer 生成 2ms 周期性事件）
@@ -317,14 +315,10 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 
-    static lv_indev_drv_t indev_drv;    // 输入设备驱动程序（触摸）
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.disp = disp;
-    indev_drv.read_cb = example_lvgl_touch_cb;
-    indev_drv.user_data = tp;
-    
-    lv_indev_drv_register(&indev_drv);
+    lv_indev_t * indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_user_data(indev, tp);
+    lv_indev_set_read_cb(indev, example_lvgl_touch_cb);
 
 
     lvgl_mux = xSemaphoreCreateMutex();
